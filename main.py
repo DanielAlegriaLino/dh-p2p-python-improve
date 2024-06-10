@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 from urllib.parse import quote
+import sys
 
 from helpers import (
     MAIN_PORT,
@@ -22,11 +23,21 @@ from helpers import (
     get_nonce,
 )
 
+from colorama import just_fix_windows_console
+just_fix_windows_console()
+from colorama import Fore, Back, Style
+
+def print_warning(*args):
+    for message in args:
+        print('\n')
+        print(Fore.RED + "++++++++++" + message + "++++++++++" +  Fore.RESET)
+
 
 def main(serial, dtype=0, username=None, password=None, debug=False):
     socketserver = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     socketserver.bind(("0.0.0.0", 554))
     socketserver.listen(5)
+    socketserver.settimeout(5)
     print("Listening on port 554")
 
     if debug:
@@ -40,24 +51,41 @@ def main(serial, dtype=0, username=None, password=None, debug=False):
             ]
         )
 
+    # It generates a socket connection to www.easy4cloud.com and adds data necesary to Phony TCP connection
+    # www.easy4cloud.com:8800
+    # Local port is anyone that is available 
     main_remote = UDP(MAIN_SERVER, MAIN_PORT, debug)
+    # request method sends POST/GET requests to www.easy4cloud.com:8800/probe/p2psrv
+    print_warning('Test Dahua Server')
     res = main_remote.request("/probe/p2psrv")
-
+    
+    
+    # request method sends POST/GET requests to www.easy4cloud.com:8800/probe/p2psrv/NS
+    print_warning('Getting dvr ip and port')
     res = main_remote.request(f"/online/p2psrv/{serial}")
 
+    # Extract and parse the IP address and port
     p2psrv_server, p2psrv_port = res["data"]["body"]["US"].split(":")
     p2psrv_port = int(p2psrv_port)
 
+
+    # Test ip address of dvr server
+    print_warning('Testing remote')
     p2psrv_remote = UDP(p2psrv_server, p2psrv_port, debug)
     res = p2psrv_remote.request(f"/probe/device/{serial}")
     p2psrv_remote.close()
 
+
+    # Relay is a port in the middle of both devices
+    print_warning('Relay port and server')
     res = main_remote.request("/online/relay")
     relay_server, relay_port = res["data"]["body"]["Address"].split(":")
     relay_port = int(relay_port)
-
+    print("Relay server--> ", relay_server, relay_port)
+    
+    
+    print_warning('Getting an token, agent server and agent port')
     device_remote = UDP(MAIN_SERVER, MAIN_PORT, debug)
-
     laddr = f"127.0.0.1:{device_remote.lport}"
     ipaddr = f"<IpEncrpt>true</IpEncrpt><LocalAddr>{laddr}</LocalAddr>"
     auth = ""
@@ -76,6 +104,8 @@ def main(serial, dtype=0, username=None, password=None, debug=False):
         f"<body>{auth}<Identify>{' '.join(f'{b:x}' for b in aid)}</Identify>{ipaddr}<version>5.0.0</version></body>",
         should_read=False,
     )
+    
+    
 
     main_remote.rhost = relay_server
     main_remote.rport = relay_port
@@ -83,14 +113,19 @@ def main(serial, dtype=0, username=None, password=None, debug=False):
     token = res["data"]["body"]["Token"]
     agent_server, agent_port = res["data"]["body"]["Agent"].split(":")
     agent_port = int(agent_port)
+    print(agent_port, agent_server, token)
 
+    print_warning('Login and creating P2P channels')
     main_remote.rhost = agent_server
     main_remote.rport = agent_port
-    res = main_remote.request(
-        f"/relay/start/{token}",
-        "<body><Client>:0</Client></body>",
-    )
-
+    
+    res['code'] = None
+    while not res['code'] == 200:
+        res = main_remote.request(
+            f"/relay/start/{token}",
+            "<body><Client>:0</Client></body>",
+        )
+    
     res = device_remote.read(return_error=True)
     if res["code"] < 200:
         res = device_remote.read(return_error=True)
@@ -105,35 +140,45 @@ def main(serial, dtype=0, username=None, password=None, debug=False):
                 f"main.py --type 1 --username <username> --password <password> {serial}"
             )
 
-        sys.exit(1)
+        sys.exit(1)    
 
-    device_laddr = res["data"]["body"]["LocalAddr"]
-    if dtype > 0:
-        nonce = res["data"]["body"]["Nonce"]
-        device_laddr = get_dec(key, nonce, device_laddr)
+    print_warning('Login')
+    login_info = res
+    while True:
+        try:
+            device_laddr = login_info["data"]["body"]["LocalAddr"]
+            if dtype > 0:
+                nonce = login_info["data"]["body"]["Nonce"]
+                device_laddr = get_dec(key, nonce, device_laddr)
 
-    device_server, device_port = res["data"]["body"]["PubAddr"].split(":")
-    device_port = int(device_port)
-    device_remote.rhost = device_server
-    device_remote.rport = device_port
+            device_server, device_port = login_info["data"]["body"]["PubAddr"].split(":")
+            device_port = int(device_port)
+            device_remote.rhost = device_server
+            device_remote.rport = device_port
 
-    main_remote.rhost = MAIN_SERVER
-    main_remote.rport = MAIN_PORT
+            main_remote.rhost = MAIN_SERVER
+            main_remote.rport = MAIN_PORT
 
-    if dtype > 0:
-        auth = get_auth(username, key, nonce)
+            if dtype > 0:
+                auth = get_auth(username, key, nonce)
 
-    res = main_remote.request(
-        f"/device/{serial}/relay-channel",
-        f"<body>{auth}<agentAddr>{agent_server}:{agent_port}</agentAddr></body>",
-        should_read=False,
-    )
+            res = main_remote.request(
+                f"/device/{serial}/relay-channel",
+                f"<body>{auth}<agentAddr>{agent_server}:{agent_port}</agentAddr></body>",
+                should_read=False,
+            )
 
-    main_remote.rhost = agent_server
-    main_remote.rport = agent_port
-    # TODO check timeout
-    res = main_remote.read()
-
+            main_remote.rhost = agent_server
+            main_remote.rport = agent_port
+            data = main_remote.read()
+            sys.exit(1)
+            
+        except TimeoutError as e:
+            print(e)
+    
+    sys.exit(1)
+    
+    print_warning('Login')
     main_remote.request_ptcp(b"\x00\x03\x01\x00")
     res = main_remote.read_ptcp()
 

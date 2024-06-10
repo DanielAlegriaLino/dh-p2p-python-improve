@@ -173,6 +173,7 @@ class UDP(socket.socket):
         self.rmid = 0
 
     def send(self, data):
+        print('sending data...')
         self.sendto(data, (self.rhost, self.rport))
 
     def recv(self, bufsize=4096, timeout=None):
@@ -187,6 +188,7 @@ class UDP(socket.socket):
         return data
 
     def read(self, return_error=False):
+        self.settimeout(1)
         data = self.recv().decode()
 
         print(f":{self.lport} <<< {self.rhost}:{self.rport}")
@@ -198,7 +200,6 @@ class UDP(socket.socket):
             print("Error:", res["status"])
             sys.exit(1)
 
-        print("Parsed <<<")
         print(json.dumps(res, indent=2))
 
         return res
@@ -231,7 +232,6 @@ Content-Length: {len(body)}
 {body}"""
 
         print(f":{self.lport} >>> {self.rhost}:{self.rport}")
-        print(req)
         self.send(req.replace("\n", "\r\n").encode())
 
         return self.read() if should_read else None
